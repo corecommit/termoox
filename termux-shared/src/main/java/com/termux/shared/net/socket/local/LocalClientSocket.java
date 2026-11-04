@@ -274,7 +274,10 @@ public class LocalClientSocket implements Closeable {
             return null;
         }
 
-        JniResult result = LocalSocketManager.available(mLocalSocketRunConfig.getLogTitle() + " (client)", mLocalSocketRunConfig.getFD());
+        // Query availability of the client socket fd (mFD), not the server socket fd of the run
+        // config, which is a listening socket and may already have been closed with -1 when the
+        // server was stopped while this client socket is still connected.
+        JniResult result = LocalSocketManager.available(mLocalSocketRunConfig.getLogTitle() + " (client)", mFD);
         if (result == null || result.retval != 0) {
             return LocalSocketErrno.ERRNO_CHECK_AVAILABLE_DATA_ON_CLIENT_SOCKET_FAILED.getError(
                 mLocalSocketRunConfig.getTitle(), JniResult.getErrorString(result));
@@ -422,7 +425,11 @@ public class LocalClientSocket implements Closeable {
                 return -1;
             }
 
-            return mBytes[0];
+            // Return the unsigned byte value (0-255). Returning the sign extended byte would
+            // report a 0xFF byte as -1, which the InputStream contract reserves for EOF, so
+            // callers like InputStream.read(byte[], int, int) would silently truncate the data
+            // at the first 0xFF byte.
+            return mBytes[0] & 0xFF;
         }
 
         @Override

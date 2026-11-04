@@ -137,6 +137,16 @@ public class TermuxOpenReceiver extends BroadcastReceiver {
         public Cursor query(@NonNull Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
             File file = new File(uri.getPath());
 
+            // Do not return a fabricated row for a file that does not exist or cannot be read,
+            // otherwise apps may treat the file as an empty existing one.
+            if (!(file.isFile() && file.canRead())) {
+                return new MatrixCursor(projection != null ? projection : new String[]{
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.SIZE,
+                    MediaStore.MediaColumns._ID
+                });
+            }
+
             if (projection == null) {
                 projection = new String[]{
                     MediaStore.MediaColumns.DISPLAY_NAME,
@@ -154,7 +164,9 @@ public class TermuxOpenReceiver extends BroadcastReceiver {
                         value = file.getName();
                         break;
                     case MediaStore.MediaColumns.SIZE:
-                        value = (int) file.length();
+                        // Do not cast to int, otherwise sizes of >= 2GB files get truncated
+                        // to negative or wrong values.
+                        value = file.length();
                         break;
                     case MediaStore.MediaColumns._ID:
                         value = 1;

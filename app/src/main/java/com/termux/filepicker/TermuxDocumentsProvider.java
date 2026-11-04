@@ -90,8 +90,13 @@ public class TermuxDocumentsProvider extends DocumentsProvider {
     public Cursor queryChildDocuments(String parentDocumentId, String[] projection, String sortOrder) throws FileNotFoundException {
         final MatrixCursor result = new MatrixCursor(projection != null ? projection : DEFAULT_DOCUMENT_PROJECTION);
         final File parent = getFileForDocId(parentDocumentId);
-        for (File file : parent.listFiles()) {
-            includeFile(result, null, file);
+        // listFiles() returns null if the path is not a directory anymore or an I/O error
+        // occurred, which would otherwise crash the whole app process with an NPE.
+        final File[] children = parent.listFiles();
+        if (children != null) {
+            for (File file : children) {
+                includeFile(result, null, file);
+            }
         }
         return result;
     }
@@ -177,7 +182,11 @@ public class TermuxDocumentsProvider extends DocumentsProvider {
             }
             if (isInsideHome) {
                 if (file.isDirectory()) {
-                    Collections.addAll(pending, file.listFiles());
+                    // listFiles() returns null if the directory could not be read.
+                    final File[] children = file.listFiles();
+                    if (children != null) {
+                        Collections.addAll(pending, children);
+                    }
                 } else {
                     if (file.getName().toLowerCase().contains(query)) {
                         includeFile(result, null, file);
@@ -191,7 +200,9 @@ public class TermuxDocumentsProvider extends DocumentsProvider {
 
     @Override
     public boolean isChildDocument(String parentDocumentId, String documentId) {
-        return documentId.startsWith(parentDocumentId);
+        // Compare against the parent path plus a trailing path separator, otherwise a document
+        // like "/home/user/home-backup" would incorrectly match the parent "/home/user/home".
+        return documentId.startsWith(parentDocumentId.endsWith("/") ? parentDocumentId : parentDocumentId + "/");
     }
 
     /**
@@ -249,7 +260,9 @@ public class TermuxDocumentsProvider extends DocumentsProvider {
         } else if (file.canWrite()) {
             flags |= Document.FLAG_SUPPORTS_WRITE;
         }
-        if (file.getParentFile().canWrite()) flags |= Document.FLAG_SUPPORTS_DELETE;
+        // getParentFile() returns null for the root of the filesystem (no parent).
+        File parentFile = file.getParentFile();
+        if (parentFile != null && parentFile.canWrite()) flags |= Document.FLAG_SUPPORTS_DELETE;
 
         final String displayName = file.getName();
         final String mimeType = getMimeType(file);

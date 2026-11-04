@@ -55,12 +55,24 @@ public class TextSelectionCursorController implements CursorController {
 
     @Override
     public boolean hide() {
+        return hide(false);
+    }
+
+    /**
+     * Hide the text selection cursors.
+     *
+     * @param force If true, bypass the anti-spam guard that ignores hide calls within 300ms of a
+     *              show call. Must be used when the view is detached from the window, otherwise
+     *              the handle PopupWindows are never dismissed and the activity leaks them
+     *              (android.view.WindowLeaked).
+     */
+    public boolean hide(boolean force) {
         if (!isActive()) return false;
 
         // prevent hide calls right after a show call, like long pressing the down key
         // 300ms seems long enough that it wouldn't cause hide problems if action button
         // is quickly clicked after the show, otherwise decrease it
-        if (System.currentTimeMillis() - mShowStartTime < 300) {
+        if (!force && System.currentTimeMillis() - mShowStartTime < 300) {
             return false;
         }
 

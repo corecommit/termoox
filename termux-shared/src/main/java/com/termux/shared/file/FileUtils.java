@@ -284,8 +284,16 @@ public class FileUtils {
                 if (!isParentPath) {
                     return true;
                 }
+            } else {
+                // The sub file itself is ignored, so do not recurse into it. Only sub files that
+                // are parents of ignored paths (like an ignored "$PREFIX/tmp" inside a non-ignored
+                // "$PREFIX") need to be visited to look for other sub files in them. Recursing
+                // into ignored directories defeated the ignore list: a prefix containing nothing
+                // but "$PREFIX/tmp" leftovers counted as non-empty, so the bootstrap was never
+                // reinstalled on a broken installation.
+                continue;
             }
-                
+
             if (getFileType(subFilePath, false) == FileType.DIRECTORY) {
                 // If non ignored sub file found, then early exit, otherwise continue looking
                 if (nonIgnoredSubFileExists(subFile.listFiles(), ignoredSubFilePaths))
@@ -1561,12 +1569,14 @@ public class FileUtils {
             fileInputStream = new FileInputStream(filePath);
             bufferedReader = new BufferedReader(new InputStreamReader(fileInputStream, charset));
 
-            String receiveString;
-
-            boolean firstLine = true;
-            while ((receiveString = bufferedReader.readLine()) != null ) {
-                if (!firstLine) dataStringBuilder.append("\n"); else firstLine = false;
-                dataStringBuilder.append(receiveString);
+            // Read the file contents as is, without going through a readLine() based loop.
+            // readLine() strips the trailing line terminator and collapses CRLF and CR to LF,
+            // so a read -> write round trip changed the file even when no line of text was
+            // modified (e.g. a trailing newline was dropped, or CRLF was converted to LF).
+            char[] buffer = new char[4096];
+            int charsRead;
+            while ((charsRead = bufferedReader.read(buffer)) != -1) {
+                dataStringBuilder.append(buffer, 0, charsRead);
             }
 
             Logger.logVerbose(LOG_TAG, Logger.getMultiLineLogStringEntry("String", DataUtils.getTruncatedCommandOutput(dataStringBuilder.toString(), Logger.LOGGER_ENTRY_MAX_SAFE_PAYLOAD, true, false, true), "-"));

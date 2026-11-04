@@ -82,8 +82,16 @@ public class LocalSocketManager {
             }
         }
 
-        mIsRunning = true;
-        return mServerSocket.start();
+        Error error = mServerSocket.start();
+        if (error != null) {
+            // Do not advertise the socket server as running (e.g. via
+            // TERMUX_APP_AM_SOCKET_SERVER_ENABLED to shells) if it failed to start, otherwise
+            // clients would try to connect to a socket that nobody is listening on.
+            mIsRunning = false;
+            return error;
+        }
+
+        return null;
     }
 
     /**

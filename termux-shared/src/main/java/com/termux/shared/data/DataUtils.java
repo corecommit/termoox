@@ -28,7 +28,10 @@ public class DataUtils {
         if (addPrefix)
             maxLength = maxLength - prefix.length();
 
-        if (maxLength < 0 || text.length() < maxLength) return text;
+        // If maxLength is smaller than the prefix length or the text does not need to be
+        // truncated, then return the text as is. Otherwise the substring() calls below would
+        // throw, or the text would be replaced by only the prefix.
+        if (maxLength <= 0 || text.length() <= maxLength) return text;
 
         if (fromEnd) {
             text = text.substring(0, maxLength);

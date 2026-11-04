@@ -439,7 +439,10 @@ public class TerminalBitmap {
                 return null;
             }
 
-            int[] pixels = new int[bitmap.getAllocationByteCount()];
+            // One int per pixel, so only bitmap width * height ints are needed, not
+            // getAllocationByteCount() ints (which counts bytes, a 4x over-allocation that
+            // could request several hundred MB near the max bitmap size and cause an OOM).
+            int[] pixels = new int[bitmap.getWidth() * bitmap.getHeight()];
             bitmap.getPixels(pixels, 0, bitmap.getWidth(), 0, 0, bitmap.getWidth(), bitmap.getHeight());
 
             newBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);

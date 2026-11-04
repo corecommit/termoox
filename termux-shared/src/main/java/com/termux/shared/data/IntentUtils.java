@@ -117,6 +117,21 @@ public class IntentUtils {
     }
 
     public static String getBundleString(Bundle bundle) {
+        // Unparceling the bundle to iterate its keys and values can throw if an extra is a
+        // Parcelable whose class is not in this app's classloader
+        // (android.os.BadParcelableException), or for other malformed values. The intents
+        // logged with this come from other apps (RUN_COMMAND service, share receivers, etc.),
+        // so a malicious or buggy sender must not be able to crash the whole app process by
+        // sending such an extra. This also runs for verbose logging which is normally disabled,
+        // since the intent string is built before the log level check.
+        try {
+            return getBundleStringUnsafely(bundle);
+        } catch (Throwable t) {
+            return "Bundle[" + t.getClass().getSimpleName() + ": " + t.getMessage() + "]";
+        }
+    }
+
+    private static String getBundleStringUnsafely(Bundle bundle) {
         if (bundle == null || bundle.size() == 0) return "Bundle[]";
 
         StringBuilder bundleString = new StringBuilder("Bundle[\n");
@@ -127,7 +142,17 @@ public class IntentUtils {
 
             bundleString.append(key).append(": `");
 
-            Object value = bundle.get(key);
+            Object value;
+            try {
+                value = bundle.get(key);
+            } catch (Throwable t) {
+                // Getting a single unparcelable value must not abort logging the remaining keys.
+                bundleString.append(t.getClass().getSimpleName()).append(": ").append(t.getMessage());
+                bundleString.append("`");
+
+                first = false;
+                continue;
+            }
             if (value instanceof int[]) {
                 bundleString.append(Arrays.toString((int[]) value));
             } else if (value instanceof byte[]) {

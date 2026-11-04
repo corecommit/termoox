@@ -707,33 +707,44 @@ public final class TerminalBuffer {
     }
 
 
-    /** Remove bitmaps that are completely scrolled out. */
+    /**
+     * Remove bitmaps that are completely scrolled out.
+     *
+     * The passed internal row is about to be cleared/reused by scrolling, so any bitmap that only
+     * existed in that row can be freed. A bitmap is only removed if no other row in the ring
+     * buffer still references it, otherwise the still visible cells of a multi-row image would
+     * lose their bitmap. The previous implementation scanned the adjacent row (row + 1) without
+     * the ring buffer modulo wraparound and also added the bitmaps found there to the removal
+     * set, which prematurely freed bitmaps of images that were still visible in the transcript.
+     */
     public synchronized void removeScrolledOutTerminalBitmaps(int row) {
-        Set<Integer> bitmapsToRemove = new HashSet<>();
+        if (mTerminalBitmaps.isEmpty()) return;
 
+        // Collect the bitmaps of the row that is being scrolled out.
+        Set<Integer> bitmapsOfClearedRow = new HashSet<>();
         for (int column = 0; column < mColumns; column++) {
-            long columnStyle = mLines[row].getStyle(column);
-            int bitmapNum = TextStyle.getTerminalBitmapNum(columnStyle);
+            int bitmapNum = TextStyle.getTerminalBitmapNum(mLines[row].getStyle(column));
             if (bitmapNum >= TERMINAL_BITMAP__NUM_START) {
-                bitmapsToRemove.add(bitmapNum);
+                bitmapsOfClearedRow.add(bitmapNum);
             }
         }
+        if (bitmapsOfClearedRow.isEmpty()) return;
 
-        if (row + 1 < mTotalRows) {
-            TerminalRow nextLine = mLines[row + 1];
-            if (nextLine.mHasTerminalBitmap) {
-                for (int column = 0; column < mColumns; column++) {
-                    long columnStyle = nextLine.getStyle(column);
-                    int bitmapNum = TextStyle.getTerminalBitmapNum(columnStyle);
-                    if (bitmapNum >= TERMINAL_BITMAP__NUM_START) {
-                        bitmapsToRemove.add(bitmapNum);
-                    }
+        // Keep the bitmaps that are still referenced by any other row of the ring buffer.
+        Set<Integer> bitmapsToRemove = new HashSet<>(bitmapsOfClearedRow);
+        for (int line = 0; line < mLines.length; line++) {
+            if (line == row || mLines[line] == null || !mLines[line].mHasTerminalBitmap) continue;
+            for (int column = 0; column < mColumns; column++) {
+                int bitmapNum = TextStyle.getTerminalBitmapNum(mLines[line].getStyle(column));
+                if (bitmapNum >= TERMINAL_BITMAP__NUM_START) {
+                    bitmapsToRemove.remove(bitmapNum);
+                    if (bitmapsToRemove.isEmpty()) return;
                 }
             }
         }
 
-        for(Integer bitmapStyle : bitmapsToRemove) {
-            mTerminalBitmaps.remove(bitmapStyle);
+        for (Integer bitmapNum : bitmapsToRemove) {
+            mTerminalBitmaps.remove(bitmapNum);
         }
     }
 

@@ -104,6 +104,14 @@ public final class TerminalRenderer {
                 final int codePoint = charIsHighsurrogate ? Character.toCodePoint(charAtIndex, line[currentCharIndex + 1]) : charAtIndex;
                 final long style = lineObject.getStyle(column);
                 if (TextStyle.isTerminalBitmap(style)) {
+                    // Flush the pending text run before drawing the bitmap, otherwise any text
+                    // accumulated before it on the row would be silently dropped.
+                    if (lastRunStartColumn >= 0 && column > lastRunStartColumn) {
+                        drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, column - lastRunStartColumn,
+                            lastRunStartIndex, currentCharIndex - lastRunStartIndex, measuredWidthForRun,
+                            lastRunInsideCursor ? mEmulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] : 0,
+                            cursorShape, lastRunStyle, reverseVideo || (lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK) || lastRunInsideSelection);
+                    }
                     Bitmap bitmap = mEmulator.getScreen().getSixelBitmap(style);
                     if (bitmap != null) {
                         float left = column * mFontWidth;
@@ -116,8 +124,11 @@ public final class TerminalRenderer {
                     measuredWidthForRun = 0.f;
                     lastRunStyle = 0;
                     lastRunInsideCursor = false;
-                    lastRunStartColumn = column + 1;
-                    lastRunStartIndex = currentCharIndex;
+                    lastRunInsideSelection = false;
+                    // The next text run starts at the first column after the bitmap cell, not one
+                    // column further (which would produce a run of negative width in drawTextRun()).
+                    lastRunStartColumn = column;
+                    lastRunStartIndex = currentCharIndex + charsForCodePoint;
                     lastRunFontWidthMismatch = false;
                     currentCharIndex += charsForCodePoint;
                     continue;

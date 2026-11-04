@@ -98,8 +98,8 @@ public final class TerminalEmulator {
      * See also {@link #mIsFastPathOsc} for enabling fast path for specific `OSC` commands if required
      * via {@link #setOscTypeVariables()}.
      * <p>
-     * See also {@link #mIgnoreCrLfForOsc} to prevent printing of CR/LF characters for specific
-     * `OSC` commands if required via {@link #setOscTypeVariables()}.
+     * CR/LF characters received while an `OSC` string is being received are ignored and do not
+     * print or scroll the terminal.
      * <p>
      * - https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Operating-System-Commands
      */
@@ -297,20 +297,24 @@ public final class TerminalEmulator {
     private int mOscType = -1;
 
     /**
+     * The {@link #mOscType} digits parsed so far by {@link #setOscTypeVariables()}, or `-1` if
+     * no digits have been parsed yet.
+     */
+    private int mOscValue = -1;
+
+    /**
+     * The number of chars of {@link #mTerminalControlArgs} already parsed by
+     * {@link #setOscTypeVariables()}.
+     */
+    private int mOscTypeArgsParseIndex = 0;
+
+    /**
      * If `true`, then `processCodePoint()` will directly call `receiveOsc()` as a fast path
      * without additional checks.
      *
      * Can be enabled for OSC commands via {@link #setOscTypeVariables()}.
      */
     private boolean mIsFastPathOsc = false;
-
-    /**
-     * If `true`, then `processCodePoint()` will not print any CR/LF characters received.
-     * This is ignored if `mIsFastPathOsc` is already `true` for a command.
-     *
-     * Can be enabled for OSC commands via {@link #setOscTypeVariables()}.
-     */
-    private boolean mIgnoreCrLfForOsc = false;
 
 
     /**
@@ -823,17 +827,20 @@ public final class TerminalEmulator {
             case 10: // Line feed (LF, \n).
             case 11: // Vertical tab (VT, \v).
             case 12: // Form feed (FF, \f).
-                // Ignore CR/LF inside DCS by default (including sixel) or OSC if requested (like for iTerm).
+                // Ignore CR/LF inside DCS (including sixel) and OSC strings, since they are part
+                // of the string payload and must not print or scroll the terminal.
                 if (!
                     (mEscapeState == ESC_DCS ||
-                    ((mEscapeState == ESC_OSC || mEscapeState == ESC_OSC__ESC) && mIgnoreCrLfForOsc))) {
+                    mEscapeState == ESC_OSC ||
+                    mEscapeState == ESC_OSC__ESC)) {
                     doLinefeed();
                 }
                 break;
             case 13: // Carriage return (CR, \r).
                 if (!
                     (mEscapeState == ESC_DCS ||
-                    ((mEscapeState == ESC_OSC || mEscapeState == ESC_OSC__ESC) && mIgnoreCrLfForOsc))) {
+                    mEscapeState == ESC_OSC ||
+                    mEscapeState == ESC_OSC__ESC)) {
                     setCursorCol(mLeftMargin);
                 }
                 break;
@@ -2055,7 +2062,7 @@ public final class TerminalEmulator {
                 doLinefeed();
                 break;
             case 'F': // Cursor to lower-left corner of screen
-                setCursorRowCol(0, mBottomMargin - 1);
+                setCursorRowCol(mBottomMargin - 1, 0);
                 break;
             case 'H': // Tab set
                 mTabStop[mCursorCol] = true;
@@ -2678,23 +2685,35 @@ public final class TerminalEmulator {
      */
     void setOscTypeVariables() {
         if (mOscType >= 0) return;
-        if (mTerminalControlArgs.indexOf(":") < 0) return;
 
-        int value = -1;
         int argsLength = mTerminalControlArgs.length();
 
-        // Extract initial $value from initial "$value;..." string.
-        for (int i = 0; i < argsLength; i++) {
-            char b = mTerminalControlArgs.charAt(i);
+        // Extract initial $value from initial "$value;..." string. This is called for every
+        // received code point while the osc type is still unknown, so the already parsed args
+        // length and value are remembered between calls to avoid re-parsing the args from the
+        // start every time.
+        while (mOscTypeArgsParseIndex < argsLength) {
+            char b = mTerminalControlArgs.charAt(mOscTypeArgsParseIndex);
             if (b == ';') {
-                mOscType = value;
+                if (mOscValue < 0) {
+                    // No osc type digits before the `;`.
+                    mOscType = -2; // Unknown sequence.
+                    return;
+                }
+                mOscType = mOscValue;
                 break;
             } else if (b >= '0' && b <= '9') {
-                value = ((value < 0) ? 0 : value * 10) + (b - '0');
+                mOscValue = ((mOscValue < 0) ? 0 : mOscValue * 10) + (b - '0');
+                if (mOscValue < 0) {
+                    // Overflow.
+                    mOscType = -2; // Unknown sequence.
+                    return;
+                }
             } else {
                 mOscType = -2; // Unknown sequence.
                 return;
             }
+            mOscTypeArgsParseIndex++;
         }
 
         if (mOscType >= 0) {
@@ -2711,7 +2730,6 @@ public final class TerminalEmulator {
                     break;
                 case 1337: // iTerm image command sends the base64 encoded image, do not run complex logic for each byte.
                     mIsFastPathOsc = true;
-                    mIgnoreCrLfForOsc = true;
                     // Expect large amount of data for image bytes.
                     // `imgcat` utility splits image bytes into 200-byte chunks when sending with `FilePart=` commands.
                     // - https://github.com/gnachman/iTerm2-shell-integration/blob/d1d4012068c3c6761d5676c28ed73e0e2df2b715/utilities/imgcat#L89
@@ -2738,8 +2756,9 @@ public final class TerminalEmulator {
      */
     public void clearOscTypeVariables() {
         mOscType = -1;
+        mOscValue = -1;
+        mOscTypeArgsParseIndex = 0;
         mIsFastPathOsc = false;
-        mIgnoreCrLfForOsc = false;
     }
 
     /**
@@ -2894,6 +2913,11 @@ public final class TerminalEmulator {
             case 1337: // iTerm image
                 // - https://iterm2.com/documentation-images.html
                 // - https://iterm2.com/documentation-escape-codes.html
+                // Ignore commands for which the required `1337;` prefix has not been received,
+                // like a bare `OSC 1337` without the semicolon, which would otherwise crash
+                // with a StringIndexOutOfBoundsException in the substring() call below since
+                // the start index 5 would be past the end of the args.
+                if (argsLength < 5) break;
                 String controlCommandPrefix = mTerminalControlArgs.substring(5, Math.min(19, argsLength));
 
                 if (controlCommandPrefix.startsWith("File=") ||
@@ -2994,6 +3018,9 @@ public final class TerminalEmulator {
                     break;
                 } else if (controlCommandPrefix.startsWith("ReportCellSize")) {
                     mSession.write(String.format(Locale.ENGLISH, "\0331337;ReportCellSize=%d;%d\007", mCellHeightPixels, mCellWidthPixels));
+                    // Break instead of falling through to the default case below, which logged
+                    // the command as an unknown parameter after it had already been handled.
+                    break;
                 }
 
                 // Free image from memory for any non `MultipartFile=` related commands.

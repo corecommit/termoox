@@ -254,6 +254,10 @@ public class RunCommandService extends Service {
 
     private int stopService() {
         runStopForeground();
+        // Stop the service once the intent has been processed and forwarded to TermuxService,
+        // otherwise the started service stays running for the whole app process lifetime even
+        // though it has nothing left to do.
+        stopSelf();
         return Service.START_NOT_STICKY;
     }
 

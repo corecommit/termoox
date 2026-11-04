@@ -26,8 +26,12 @@ public class LocalServerSocket implements Closeable {
     /** The {@link ILocalSocketManager} client for the {@link LocalSocketManager}. */
     @NonNull protected final ILocalSocketManager mLocalSocketManagerClient;
 
-    /** The {@link ClientSocketListener} {@link Thread} for the {@link LocalServerSocket}. */
-    @NonNull protected final Thread mClientSocketListener;
+    /**
+     * The {@link ClientSocketListener} {@link Thread} for the {@link LocalServerSocket}.
+     * A new one is created on every {@link #start()} call, since a {@link Thread} cannot be
+     * started more than once and the server should be restartable after a {@link #stop()}.
+     */
+    protected Thread mClientSocketListener;
 
     /**
      * The required permissions for server socket file parent directory.
@@ -45,7 +49,6 @@ public class LocalServerSocket implements Closeable {
         mLocalSocketManager = localSocketManager;
         mLocalSocketRunConfig = localSocketManager.getLocalSocketRunConfig();
         mLocalSocketManagerClient = mLocalSocketRunConfig.getLocalSocketManagerClient();
-        mClientSocketListener = new Thread(new ClientSocketListener());
     }
 
     /** Start server by creating server socket. */
@@ -111,6 +114,7 @@ public class LocalServerSocket implements Closeable {
         // Update fd to signify that server socket has been created successfully
         mLocalSocketRunConfig.setFD(fd);
 
+        mClientSocketListener = new Thread(new ClientSocketListener());
         mClientSocketListener.setUncaughtExceptionHandler(mLocalSocketManager.getLocalSocketManagerClientThreadUEH());
 
         try {
@@ -127,16 +131,57 @@ public class LocalServerSocket implements Closeable {
     public synchronized Error stop() {
         Logger.logDebug(LOG_TAG, "stop");
 
-        try {
-            // Stop the LocalClientSocket listener.
-            mClientSocketListener.interrupt();
-        } catch (Exception ignored) {}
-
+        // Close the server socket fd so that the accept() loop exits once it is no longer
+        // blocked in the native accept() call.
         Error error = closeServerSocket(false);
         if (error != null)
             return error;
 
+        // Thread.interrupt() does not wake up a thread blocked in the native accept() call,
+        // and closing the fd does not either, since the blocked syscall keeps its own
+        // reference to the listening socket. So connect a dummy client to the server socket
+        // to wake up the blocked accept(); the accept() loop then sees the closed server fd
+        // (>= 0 check fails), discards the wakeup connection and exits. Without this, every
+        // stop() leaked a permanently blocked thread and it kept serving backlog connections.
+        wakeUpClientSocketListener();
+
+        try {
+            // Stop the LocalClientSocket listener if it is between two accept() calls.
+            mClientSocketListener.interrupt();
+        } catch (Exception ignored) {}
+
         return deleteServerSocketFile();
+    }
+
+    /** Connect and close a dummy client socket to wake up the {@link ClientSocketListener} thread
+     * blocked in the native accept() call of the server socket. */
+    private void wakeUpClientSocketListener() {
+        if (mLocalSocketRunConfig.getFD() >= 0) {
+            // Server socket is still open, nothing to do.
+            return;
+        }
+
+        String path = mLocalSocketRunConfig.getPath();
+        if (path == null || path.isEmpty()) return;
+
+        try {
+            android.net.LocalSocket socket = new android.net.LocalSocket();
+            if (mLocalSocketRunConfig.isAbstractNamespaceSocket()) {
+                // The abstract namespace name must not contain the leading null byte.
+                String name = path.startsWith("\0") ? path.substring(1) : path;
+                socket.connect(new android.net.LocalSocketAddress(name, android.net.LocalSocketAddress.Namespace.ABSTRACT));
+            } else {
+                socket.connect(new android.net.LocalSocketAddress(FileUtils.getCanonicalPath(path, null),
+                    android.net.LocalSocketAddress.Namespace.FILESYSTEM));
+            }
+            // The dummy connection is accepted by the listening socket, which wakes up the
+            // blocked accept(). It is discarded by the accept() loop, so just close our end.
+            socket.close();
+        } catch (IOException e) {
+            // The listener thread was not blocked in accept() or the socket file was already
+            // deleted, so there is nothing to wake up.
+            Logger.logVerbose(LOG_TAG, "Failed to connect dummy client socket to wake up client socket listener: " + e.getMessage());
+        }
     }
 
     /** Close server socket. */
@@ -197,6 +242,11 @@ public class LocalServerSocket implements Closeable {
 
             JniResult result = LocalSocketManager.accept(mLocalSocketRunConfig.getLogTitle() + " (client)", fd);
             if (result == null || result.retval != 0) {
+                // If the server socket was closed while the listener thread was blocked in the
+                // native accept() call, then the call fails with a bad fd error, which must not
+                // be propagated as an error to the client (spurious error log).
+                if (mLocalSocketRunConfig.getFD() < 0)
+                    return null;
                 mLocalSocketManager.onError(
                     LocalSocketErrno.ERRNO_ACCEPT_CLIENT_SOCKET_FAILED.getError(mLocalSocketRunConfig.getTitle(), JniResult.getErrorString(result)));
                 continue;
@@ -207,6 +257,14 @@ public class LocalServerSocket implements Closeable {
                 mLocalSocketManager.onError(
                     LocalSocketErrno.ERRNO_CLIENT_SOCKET_FD_INVALID.getError(clientFD, mLocalSocketRunConfig.getTitle()));
                 continue;
+            }
+
+            // If the server socket was closed while the listener thread was blocked in the
+            // native accept() call (like by stop(), which connects a dummy client socket to
+            // wake up the thread), then discard the wakeup connection instead of processing it.
+            if (mLocalSocketRunConfig.getFD() < 0) {
+                LocalClientSocket.closeClientSocket(mLocalSocketManager, clientFD);
+                return null;
             }
 
             PeerCred peerCred = new PeerCred();

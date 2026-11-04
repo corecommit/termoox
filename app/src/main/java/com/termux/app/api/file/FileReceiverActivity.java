@@ -14,6 +14,7 @@ import com.termux.R;
 import com.termux.shared.android.PackageUtils;
 import com.termux.shared.data.DataUtils;
 import com.termux.shared.data.IntentUtils;
+import com.termux.shared.file.FileUtils;
 import com.termux.shared.net.uri.UriUtils;
 import com.termux.shared.interact.MessageDialogUtils;
 import com.termux.shared.net.uri.UriScheme;
@@ -50,6 +51,14 @@ public class FileReceiverActivity extends AppCompatActivity {
      */
     boolean mFinishOnDismissNameDialog = true;
 
+    /**
+     * If the launch intent has already been processed by {@link #onResume()}. The activity is
+     * exported and receives intents from other apps, and onResume() can be called multiple times
+     * for a single launch (e.g. split screen mode), which would re-process the intent, stack
+     * another name dialog and re-save the file.
+     */
+    boolean mIntentProcessed = false;
+
     private static final String API_TAG = TermuxConstants.TERMUX_APP_NAME + "FileReceiver";
 
     private static final String LOG_TAG = "FileReceiverActivity";
@@ -62,8 +71,25 @@ public class FileReceiverActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // The activity is launched with singleTop, so an intent for an already running activity
+        // is delivered here instead of onCreate(). Track it so that the next onResume() handles
+        // the new intent instead of re-processing the previous one.
+        setIntent(intent);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
+
+        // Process the launch intent only once. onResume() is also called again after the activity
+        // was paused (e.g. when going split screen or when another dialog covered it), and
+        // re-processing the intent would stack another name dialog on top and re-save the file.
+        if (mIntentProcessed) {
+            return;
+        }
+        mIntentProcessed = true;
 
         final Intent intent = getIntent();
         final String action = intent.getAction();
@@ -151,7 +177,17 @@ public class FileReceiverActivity extends AppCompatActivity {
             if (attachmentFileName == null) attachmentFileName = subjectFromIntent;
             if (attachmentFileName == null) attachmentFileName = UriUtils.getUriFileBasename(uri, true);
 
+            // The file name is controlled by the sending app and is pre-filled into the name
+            // dialog, so sanitize it before it is used to resolve a path under the receive
+            // directory, otherwise a name like "../.termux/termux.properties" would escape it
+            // and overwrite arbitrary files in private storage.
+            attachmentFileName = FileUtils.sanitizeFileName(attachmentFileName, true, false);
+
             InputStream in = getContentResolver().openInputStream(uri);
+            if (in == null) {
+                showErrorDialogAndQuit("Unable to open shared content: openInputStream() returned null for \"" + uri + "\".");
+                return;
+            }
             promptNameAndSave(in, attachmentFileName);
         } catch (Exception e) {
             showErrorDialogAndQuit("Unable to handle shared content:\n\n" + e.getMessage());
@@ -160,9 +196,13 @@ public class FileReceiverActivity extends AppCompatActivity {
     }
 
     void promptNameAndSave(final InputStream in, final String attachmentFileName) {
+        // The dialog buttons can only be clicked once since each click finishes the activity,
+        // but if the stream was already consumed or closed by a previous click, fail with an
+        // error instead of e.g. silently saving an empty file.
         TextInputDialogUtils.textInput(this, R.string.title_file_received, attachmentFileName,
             R.string.action_file_received_edit, text -> {
                 File outFile = saveStreamWithName(in, text);
+                closeStream(in);
                 if (outFile == null) return;
 
                 final File editorProgramFile = new File(EDITOR_PROGRAM);
@@ -186,6 +226,7 @@ public class FileReceiverActivity extends AppCompatActivity {
             },
             R.string.action_file_received_open_directory, text -> {
                 if (saveStreamWithName(in, text) == null) return;
+                closeStream(in);
 
                 Intent executeIntent = new Intent(TERMUX_SERVICE.ACTION_SERVICE_EXECUTE);
                 executeIntent.putExtra(TERMUX_SERVICE.EXTRA_WORKDIR, TERMUX_RECEIVEDIR);
@@ -193,9 +234,23 @@ public class FileReceiverActivity extends AppCompatActivity {
                 startService(executeIntent);
                 finish();
             },
-            android.R.string.cancel, text -> finish(), dialog -> {
+            android.R.string.cancel, text -> {
+                closeStream(in);
+                finish();
+            }, dialog -> {
+                // The dialog was dismissed (back button or tap outside), so the stream will not
+                // be consumed by any button callback. Close it here as the last resort.
+                closeStream(in);
                 if (mFinishOnDismissNameDialog) finish();
             });
+    }
+
+    private void closeStream(InputStream in) {
+        try {
+            in.close();
+        } catch (IOException e) {
+            Logger.logStackTraceWithMessage(LOG_TAG, "Failed to close input stream", e);
+        }
     }
 
     public File saveStreamWithName(InputStream in, String attachmentFileName) {
@@ -205,6 +260,10 @@ public class FileReceiverActivity extends AppCompatActivity {
             showErrorDialogAndQuit("File name cannot be null or empty");
             return null;
         }
+
+        // Sanitize the user provided name as well, since it is used to resolve a path under the
+        // receive directory and must not contain path separators or parent directory references.
+        attachmentFileName = FileUtils.sanitizeFileName(attachmentFileName, true, false);
 
         if (!receiveDir.isDirectory() && !receiveDir.mkdirs()) {
             showErrorDialogAndQuit("Cannot create directory: " + receiveDir.getAbsolutePath());
@@ -222,6 +281,13 @@ public class FileReceiverActivity extends AppCompatActivity {
             }
             return outFile;
         } catch (IOException e) {
+            // The input stream is closed by the caller after this returns null, but close it
+            // here too in case the caller changes.
+            try {
+                in.close();
+            } catch (IOException e2) {
+                // Ignore.
+            }
             showErrorDialogAndQuit("Error saving file:\n\n" + e);
             Logger.logStackTraceWithMessage(LOG_TAG, "Error saving file", e);
             return null;

@@ -617,13 +617,18 @@ public final class TerminalView extends View {
                 if (action == MotionEvent.ACTION_DOWN) showContextMenu();
                 return true;
             } else if (event.isButtonPressed(MotionEvent.BUTTON_TERTIARY)) {
-                ClipboardManager clipboardManager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
-                ClipData clipData = clipboardManager.getPrimaryClip();
-                if (clipData != null) {
-                    ClipData.Item clipItem = clipData.getItemAt(0);
-                    if (clipItem != null) {
-                        CharSequence text = clipItem.coerceToText(getContext());
-                        if (!TextUtils.isEmpty(text)) mEmulator.paste(text.toString());
+                // Only paste once per gesture, on the initial press. Without the ACTION_DOWN
+                // check, isButtonPressed() stays true for ACTION_MOVE/ACTION_UP events as well,
+                // so a middle click with even slight movement pasted the clipboard repeatedly.
+                if (action == MotionEvent.ACTION_DOWN) {
+                    ClipboardManager clipboardManager = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+                    ClipData clipData = clipboardManager.getPrimaryClip();
+                    if (clipData != null) {
+                        ClipData.Item clipItem = clipData.getItemAt(0);
+                        if (clipItem != null) {
+                            CharSequence text = clipItem.coerceToText(getContext());
+                            if (!TextUtils.isEmpty(text)) mEmulator.paste(text.toString());
+                        }
                     }
                 }
             } else if (mEmulator.isMouseTrackingActive()) { // BUTTON_PRIMARY.
@@ -1049,7 +1054,13 @@ public final class TerminalView extends View {
     }
 
     public int getCursorY(float y) {
-        return (int) (((y - 40) / mRenderer.mFontLineSpacing) + mTopRow);
+        // Inverse of getPointY(cy + 1): the selection handles anchor at the bottom edge of row cy.
+        // The rounding also absorbs the small upwards offset (-30% of the handle height) that
+        // TextSelectionHandleView applies while dragging, so the row whose bottom edge is nearest
+        // to the dragged position is selected. The previous implementation subtracted a hardcoded
+        // 40px, which only matched the line spacing of the default font size and made the
+        // pixel <-> row round trip off by at least one row for every other font size.
+        return Math.round(y / mRenderer.mFontLineSpacing) - 1 + mTopRow;
     }
 
     public int getPointX(int cx) {
@@ -1382,8 +1393,8 @@ public final class TerminalView extends View {
         getTextSelectionCursorController().show(event);
     }
 
-    private boolean hideTextSelectionCursors() {
-        return getTextSelectionCursorController().hide();
+    private boolean hideTextSelectionCursors(boolean force) {
+        return getTextSelectionCursorController().hide(force);
     }
 
     private void renderTextSelection() {
@@ -1438,7 +1449,7 @@ public final class TerminalView extends View {
     }
 
     public void stopTextSelectionMode() {
-        if (hideTextSelectionCursors()) {
+        if (hideTextSelectionCursors(false)) {
             mClient.copyModeChanged(isSelectingText());
             invalidate();
         }
@@ -1466,7 +1477,10 @@ public final class TerminalView extends View {
         if (mTextSelectionCursorController != null) {
             // Might solve the following exception
             // android.view.WindowLeaked: Activity com.termux.app.TermuxActivity has leaked window android.widget.PopupWindow
-            stopTextSelectionMode();
+            // The hide is forced so the 300ms anti-spam guard after a show call cannot skip the
+            // dismissal of the handle PopupWindows when the view is detached shortly after the
+            // selection was started.
+            hideTextSelectionCursors(true);
 
             getViewTreeObserver().removeOnTouchModeChangeListener(mTextSelectionCursorController);
             mTextSelectionCursorController.onDetached();

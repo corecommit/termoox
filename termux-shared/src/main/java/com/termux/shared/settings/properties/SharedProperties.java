@@ -1,6 +1,7 @@
 package com.termux.shared.settings.properties;
 
 import android.content.Context;
+import android.os.Looper;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -163,7 +164,12 @@ public class SharedProperties {
                 if (mProperties == null) mProperties = new Properties();
                 return getPropertiesCopy(mProperties);
             } else {
-                return getPropertiesFromFile(mContext, mPropertiesFile, mSharedPropertiesParser);
+                Properties properties = getPropertiesFromFile(mContext, mPropertiesFile, mSharedPropertiesParser);
+                // Reading the file may fail (returns null), e.g. if the file exists but cannot be
+                // opened. Fall back to empty properties instead of crashing with an NPE at the
+                // callers of getProperty() and loadPropertiesFromDisk().
+                if (properties == null) properties = new Properties();
+                return properties;
             }
         }
     }
@@ -244,8 +250,11 @@ public class SharedProperties {
                 properties.load(new InputStreamReader(in, StandardCharsets.UTF_8));
             }
         } catch (Exception e) {
-            if (context != null)
+            if (context != null && Looper.myLooper() == Looper.getMainLooper()) {
+                // Only show the toast on the main thread; showing it from a background thread
+                // would throw "Can't toast on a thread that has not called Looper.prepare()".
                 Toast.makeText(context, "Could not open properties file \"" + propertiesFile.getAbsolutePath() + "\": " + e.getMessage(), Toast.LENGTH_LONG).show();
+            }
             Logger.logStackTraceWithMessage(LOG_TAG, "Error loading properties file \"" + propertiesFile.getAbsolutePath() + "\"", e);
             return null;
         }
